@@ -1,0 +1,221 @@
+{
+  "name": "Weather Operations Alert System",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "hours", "hoursInterval": 3 }]
+        }
+      },
+      "id": "node-schedule",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// City configuration with coordinates and climate-relative thresholds\nconst cities = [\n  {\n    name: 'Tallinn',\n    country: 'Estonia',\n    lat: 59.4370,\n    lon: 24.7536,\n    timezone: 'Europe/Tallinn',\n    thresholds: {\n      // Tallinn: cold baseline. Snow is normal. Alert only on extreme events.\n      snowfall_cm_urgent: 20,       // >20cm in 24h = severe disruption\n      snowfall_cm_heads_up: 10,     // >10cm = plan ahead\n      rain_mm_urgent: 30,           // Heavy rain (unusual for Tallinn)\n      rain_mm_heads_up: 15,\n      wind_kmh_urgent: 65,          // Storm-force\n      wind_kmh_heads_up: 45,\n      temp_min_urgent: -20,         // Extreme cold – courier supply risk\n      temp_min_heads_up: -15,\n      visibility_m_urgent: 200,     // Near-zero visibility\n      visibility_m_heads_up: 500\n    }\n  },\n  {\n    name: 'Madrid',\n    country: 'Spain',\n    lat: 40.4168,\n    lon: -3.7038,\n    timezone: 'Europe/Madrid',\n    thresholds: {\n      // Madrid: dry baseline. Heat is the primary risk. Snow is exceptional.\n      snowfall_cm_urgent: 2,        // ANY snow = disruption (rare)\n      snowfall_cm_heads_up: 0.5,\n      rain_mm_urgent: 40,           // Intense thunderstorms\n      rain_mm_heads_up: 20,\n      wind_kmh_urgent: 70,\n      wind_kmh_heads_up: 50,\n      temp_max_urgent: 40,          // Heatwave – courier health + supply drop\n      temp_max_heads_up: 36,\n      temp_min_urgent: -5,          // Rare freeze – ice on roads\n      temp_min_heads_up: -2\n    }\n  },\n  {\n    name: 'Warsaw',\n    country: 'Poland',\n    lat: 52.2297,\n    lon: 21.0122,\n    timezone: 'Europe/Warsaw',\n    thresholds: {\n      // Warsaw: mixed climate. Cold winters + summer storms.\n      snowfall_cm_urgent: 15,\n      snowfall_cm_heads_up: 7,\n      rain_mm_urgent: 35,\n      rain_mm_heads_up: 18,\n      wind_kmh_urgent: 65,\n      wind_kmh_heads_up: 45,\n      temp_min_urgent: -18,\n      temp_min_heads_up: -12,\n      temp_max_urgent: 37,\n      temp_max_heads_up: 33\n    }\n  },\n  {\n    name: 'Lagos',\n    country: 'Nigeria',\n    lat: 6.5244,\n    lon: 3.3792,\n    timezone: 'Africa/Lagos',\n    thresholds: {\n      // Lagos: tropical baseline. Heavy rain + flooding are primary risks.\n      // Snow threshold intentionally extreme – any snow = unprecedented alert.\n      snowfall_cm_urgent: 0.1,      // ANY snow = extraordinary event\n      snowfall_cm_heads_up: 0.1,\n      rain_mm_urgent: 60,           // Flooding risk threshold\n      rain_mm_heads_up: 35,         // Heavy tropical rain\n      wind_kmh_urgent: 55,          // Tropical storm\n      wind_kmh_heads_up: 40,\n      temp_max_urgent: 42,          // Extreme heat – unusual even for Lagos\n      temp_max_heads_up: 38,\n      humidity_pct_urgent: 95,      // Extreme humidity compounds heat risk\n      humidity_pct_heads_up: 88\n    }\n  }\n];\n\nreturn cities.map(city => ({ json: city }));"
+      },
+      "id": "node-cities",
+      "name": "City Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.open-meteo.com/v1/forecast?latitude={{ $json.lat }}&longitude={{ $json.lon }}&hourly=temperature_2m,precipitation,snowfall,windspeed_10m,visibility,relativehumidity_2m&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,snowfall_sum,windspeed_10m_max&forecast_days=2&timezone={{ $json.timezone }}",
+        "options": {}
+      },
+      "id": "node-weather-fetch",
+      "name": "Fetch Weather Forecast",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge city config with weather data and evaluate thresholds\nconst cityConfig = $('City Config').item.json;\nconst weather = $input.item.json;\n\nconst daily = weather.daily;\nconst hourly = weather.hourly;\n\n// Aggregate next 48h\nconst next48h = {\n  max_temp: Math.max(...daily.temperature_2m_max.slice(0, 2)),\n  min_temp: Math.min(...daily.temperature_2m_min.slice(0, 2)),\n  total_rain_mm: daily.precipitation_sum.slice(0, 2).reduce((a, b) => a + b, 0),\n  total_snow_cm: daily.snowfall_sum.slice(0, 2).reduce((a, b) => a + b, 0),\n  max_wind_kmh: Math.max(...daily.windspeed_10m_max.slice(0, 2)),\n  min_visibility_m: Math.min(...hourly.visibility.slice(0, 48).filter(v => v != null)),\n  max_humidity: Math.max(...hourly.relativehumidity_2m.slice(0, 48).filter(h => h != null))\n};\n\nconst t = cityConfig.thresholds;\nconst triggers = [];\nlet highestSeverity = null;\n\n// Evaluate each condition\nconst checks = [\n  { condition: 'heavy_snow', value: next48h.total_snow_cm, urgent: t.snowfall_cm_urgent, heads_up: t.snowfall_cm_heads_up, label: 'Snowfall', unit: 'cm' },\n  { condition: 'heavy_rain', value: next48h.total_rain_mm, urgent: t.rain_mm_urgent, heads_up: t.rain_mm_heads_up, label: 'Rainfall', unit: 'mm' },\n  { condition: 'strong_wind', value: next48h.max_wind_kmh, urgent: t.wind_kmh_urgent, heads_up: t.wind_kmh_heads_up, label: 'Wind', unit: 'km/h' },\n  { condition: 'extreme_heat', value: next48h.max_temp, urgent: t.temp_max_urgent, heads_up: t.temp_max_heads_up, label: 'Max Temp', unit: '°C' },\n  { condition: 'extreme_cold', value: next48h.min_temp, urgent_below: t.temp_min_urgent, heads_up_below: t.temp_min_heads_up, label: 'Min Temp', unit: '°C', invert: true },\n  { condition: 'low_visibility', value: next48h.min_visibility_m, urgent_below: t.visibility_m_urgent, heads_up_below: t.visibility_m_heads_up, label: 'Visibility', unit: 'm', invert: true },\n  { condition: 'high_humidity', value: next48h.max_humidity, urgent: t.humidity_pct_urgent, heads_up: t.humidity_pct_heads_up, label: 'Humidity', unit: '%' }\n];\n\nfor (const check of checks) {\n  if (check.value == null) continue;\n  \n  let severity = null;\n  if (check.invert) {\n    if (check.urgent_below != null && check.value <= check.urgent_below) severity = 'urgent';\n    else if (check.heads_up_below != null && check.value <= check.heads_up_below) severity = 'heads_up';\n  } else {\n    if (check.urgent != null && check.value >= check.urgent) severity = 'urgent';\n    else if (check.heads_up != null && check.value >= check.heads_up) severity = 'heads_up';\n  }\n  \n  if (severity) {\n    triggers.push({ ...check, severity });\n    if (severity === 'urgent' || highestSeverity === null) highestSeverity = severity;\n  }\n}\n\nreturn [{\n  json: {\n    city: cityConfig.name,\n    country: cityConfig.country,\n    should_alert: triggers.length > 0,\n    severity: highestSeverity,\n    triggers,\n    weather_summary: next48h,\n    evaluated_at: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "node-evaluate",
+      "name": "Evaluate Thresholds",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.should_alert }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "node-if-alert",
+      "name": "Alert Needed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Deduplication: create a fingerprint for this alert\n// Alerts with the same fingerprint won't fire again within 6 hours\nconst data = $input.item.json;\n\nconst conditionTypes = data.triggers.map(t => t.condition).sort().join('_');\nconst fingerprint = `${data.city}_${conditionTypes}_${new Date().toISOString().slice(0, 13)}`;\n// Slice to hour (YYYY-MM-DDTHH) → same alert won't repeat within the same hour window\n// For 6h dedup, round to nearest 6h block:\nconst hour = new Date().getUTCHours();\nconst block = Math.floor(hour / 6) * 6;\nconst dedupKey = `${data.city}_${conditionTypes}_${new Date().toISOString().slice(0, 10)}_block${block}`;\n\nreturn [{ json: { ...data, dedup_key: dedupKey, fingerprint } }];"
+      },
+      "id": "node-dedup",
+      "name": "Build Dedup Key",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 200]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "key": "={{ $json.dedup_key }}",
+        "options": {}
+      },
+      "id": "node-dedup-check",
+      "name": "Check Already Sent",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [1560, 200],
+      "notes": "Uses n8n's built-in static data as a simple key store. Replace with Redis for production."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Use n8n's static workflow data as a lightweight dedup store\n// (Works without Redis – suitable for free-tier self-hosted n8n)\nconst data = $input.item.json;\nconst key = data.dedup_key;\n\nconst store = $getWorkflowStaticData('global');\nconst now = Date.now();\nconst SIX_HOURS = 6 * 60 * 60 * 1000;\n\n// Clean up expired keys\nfor (const k of Object.keys(store)) {\n  if (now - store[k] > SIX_HOURS) delete store[k];\n}\n\nconst alreadySent = !!store[key];\n\nif (!alreadySent) {\n  store[key] = now; // Mark as sent\n}\n\nreturn [{ json: { ...data, already_sent: alreadySent } }];"
+      },
+      "id": "node-dedup-store",
+      "name": "Dedup Store (Static Data)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.already_sent }}",
+              "value2": false
+            }
+          ]
+        }
+      },
+      "id": "node-if-dedup",
+      "name": "Not Already Sent?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1780, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the prompt for Claude\nconst d = $input.item.json;\nconst triggerDescriptions = d.triggers.map(t => \n  `- ${t.label}: ${t.value?.toFixed(1)} ${t.unit} (threshold: ${t.invert ? 'below' : 'above'} ${t.severity === 'urgent' ? (t.urgent_below ?? t.urgent) : (t.heads_up_below ?? t.heads_up)} ${t.unit}) → ${t.severity.toUpperCase()}`\n).join('\\n');\n\nconst prompt = `You are an operational intelligence assistant for a field operations platform.\n\nA weather monitoring system has detected conditions that may affect courier operations in ${d.city}, ${d.country} in the next 24–48 hours.\n\nOverall severity: ${d.severity === 'urgent' ? '🚨 URGENT' : '⚠️ HEADS-UP'}\n\nTriggered conditions:\n${triggerDescriptions}\n\nWeather summary (next 48h):\n- Max temperature: ${d.weather_summary.max_temp}°C\n- Min temperature: ${d.weather_summary.min_temp}°C\n- Total rainfall: ${d.weather_summary.total_rain_mm.toFixed(1)}mm\n- Total snowfall: ${d.weather_summary.total_snow_cm.toFixed(1)}cm\n- Max wind speed: ${d.weather_summary.max_wind_kmh.toFixed(0)}km/h\n\nWrite a Slack alert for the Local Operations Manager in ${d.city}. Requirements:\n1. Start with the severity emoji and city name on the first line\n2. In 2–3 sentences, explain what's coming and WHY it matters for courier operations specifically (acceptance rates, delivery times, courier supply, safety)\n3. Give 2–3 concrete, actionable steps the OM should take NOW\n4. End with a single \"Key metric to watch\" line\n5. Write in plain English. No weather jargon. Max 120 words total.\n6. Tone: direct and calm. This is a professional operational alert, not a news broadcast.\n\nRespond with ONLY the Slack message text. No preamble, no explanation.`;\n\nreturn [{ json: { ...d, llm_prompt: prompt } }];"
+      },
+      "id": "node-build-prompt",
+      "name": "Build LLM Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2000, 200]
+    },
+    {
+      "parameters": {
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-api-key", "value": "={{ $credentials.httpHeaderAuth.value }}" },
+            { "name": "anthropic-version", "value": "2023-06-01" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"claude-sonnet-4-20250514\",\n  \"max_tokens\": 400,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify($json.llm_prompt) }}\n    }\n  ]\n}",
+        "options": {}
+      },
+      "id": "node-claude",
+      "name": "Claude – Generate Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2220, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract Claude's response and merge with alert data\nconst claudeResponse = $input.item.json;\nconst previousData = $('Build LLM Prompt').item.json;\n\nconst alertText = claudeResponse.content?.[0]?.text ?? 'Alert generation failed – check weather data manually.';\n\nreturn [{\n  json: {\n    ...previousData,\n    alert_text: alertText\n  }\n}];"
+      },
+      "id": "node-parse-claude",
+      "name": "Parse Claude Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2440, 200]
+    },
+    {
+      "parameters": {
+        "url": "={{ $credentials.slackWebhookUrl }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"blocks\": [\n    {\n      \"type\": \"section\",\n      \"text\": {\n        \"type\": \"mrkdwn\",\n        \"text\": {{ JSON.stringify($json.alert_text) }}\n      }\n    },\n    {\n      \"type\": \"divider\"\n    },\n    {\n      \"type\": \"context\",\n      \"elements\": [\n        {\n          \"type\": \"mrkdwn\",\n          \"text\": \"📍 *{{ $json.city }}, {{ $json.country }}* · Severity: *{{ $json.severity === 'urgent' ? '🚨 URGENT' : '⚠️ HEADS-UP' }}* · {{ $json.evaluated_at }}\"\n        }\n      ]\n    }\n  ]\n}",
+        "options": {}
+      },
+      "id": "node-slack",
+      "name": "Post to Slack",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2660, 200]
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [[{ "node": "City Config", "type": "main", "index": 0 }]]
+    },
+    "City Config": {
+      "main": [[{ "node": "Fetch Weather Forecast", "type": "main", "index": 0 }]]
+    },
+    "Fetch Weather Forecast": {
+      "main": [[{ "node": "Evaluate Thresholds", "type": "main", "index": 0 }]]
+    },
+    "Evaluate Thresholds": {
+      "main": [[{ "node": "Alert Needed?", "type": "main", "index": 0 }]]
+    },
+    "Alert Needed?": {
+      "main": [
+        [{ "node": "Build Dedup Key", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Build Dedup Key": {
+      "main": [[{ "node": "Dedup Store (Static Data)", "type": "main", "index": 0 }]]
+    },
+    "Dedup Store (Static Data)": {
+      "main": [[{ "node": "Not Already Sent?", "type": "main", "index": 0 }]]
+    },
+    "Not Already Sent?": {
+      "main": [
+        [{ "node": "Build LLM Prompt", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Build LLM Prompt": {
+      "main": [[{ "node": "Claude – Generate Alert", "type": "main", "index": 0 }]]
+    },
+    "Claude – Generate Alert": {
+      "main": [[{ "node": "Parse Claude Response", "type": "main", "index": 0 }]]
+    },
+    "Parse Claude Response": {
+      "main": [[{ "node": "Post to Slack", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "n8nVersion": "1.0.0"
+  }
+}

@@ -1,0 +1,17 @@
+# Environment
+.env
+*.env.local
+
+# n8n local data
+.n8n/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Screenshots / recordings (add manually)
+screenshots/*.mp4
+screenshots/*.mov
+
+# Node
+node_modules/
